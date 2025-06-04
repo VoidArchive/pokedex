@@ -2,47 +2,66 @@ package repl
 
 import (
 	"fmt"
-	"math/rand"
+	"strings"
+	"time"
+
+	"github.com/voidarchive/pokedex/internal/pokeapi"
+	"github.com/voidarchive/pokedex/internal/shared/constants"
 )
+
+// ansiReset is already defined in command_catch.go, using ColorReset from colors.go is better for consistency.
+// We'll assume ColorReset is available globally in the package or use repl.ColorReset if not.
 
 func commandCatch(cfg *Config, args ...string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("you must provide a Pokemon name to catch")
+		return fmt.Errorf("%susage: catch <pokemon_name> [pokeball_type (e.g., pokeball, greatball)]%s", constants.ColorYellow, constants.ColorReset)
 	}
 	pokemonName := args[0]
 
-	fmt.Printf("Throwing a Pokeball at %s...\n", pokemonName)
+	ballToUseKey := DefaultBall // from types.go
+	if len(args) > 1 {
+		ballToUseKey = strings.ToLower(args[1])
+	}
+
+	chosenBall, ballExists := KnownPokeballs[ballToUseKey]
+	if !ballExists {
+		return fmt.Errorf("%sunknown pokeball type: %s%s%s. Available: pokeball, greatball, ultraball%s", constants.ColorYellow, constants.ColorBrightRed, ballToUseKey, constants.ColorYellow, constants.ColorReset)
+	}
+
+	// Check inventory
+	if count, hasBall := cfg.Inventory[ballToUseKey]; !hasBall || count <= 0 {
+		return fmt.Errorf("%syou don't have any %s%s%s left%s", constants.ColorYellow, chosenBall.Color, chosenBall.Name, constants.ColorYellow, constants.ColorReset)
+	}
+
+	// Decrement ball count (attempt is made)
+	cfg.Inventory[ballToUseKey]--
+
+	fmt.Printf("Throwing a %s%s%s at %s%s%s...\n", chosenBall.Color, chosenBall.Name, constants.ColorReset, constants.ColorYellow, pokemonName, constants.ColorReset)
 
 	// Check if already caught before making an API call
 	if _, caught := cfg.Pokedex[pokemonName]; caught {
-		fmt.Printf("%s has already been caught!\n", pokemonName)
-		fmt.Println("You can inspect it using the 'inspect' command.") // Added hint for future inspect command
+		fmt.Printf("%s%s%s has already been caught!%s\n", constants.ColorYellow, constants.ColorBrightYellow, pokemonName, constants.ColorReset)
+		fmt.Printf("%sYou can inspect it using the 'inspect' command.%s\n", constants.ColorGray, constants.ColorReset)
+		// Note: The ball was used, so inventory remains decremented.
 		return nil
 	}
 
 	pokemonData, err := cfg.PokeapiClient.FetchPokemon(pokemonName)
 	if err != nil {
-		// The FetchPokemon method already provides a good error message, including if not found.
-		return err
+		return err // API client errors are already formatted or will be by the top-level handler
 	}
 
-	// Catching logic:
-	// Higher base experience makes it harder to catch.
-	// We want the chance of success to decrease as base_experience increases.
-	// Using a scale where a random number needs to be below a threshold that is
-	// inversely related to base_experience.
-	const maxRollValue = 400 // Defines the range of the random roll [0, maxRollValue-1]
-
-	// Calculate a dynamic success threshold. Higher BE reduces this threshold.
+	const maxRollValue = 400
 	successThreshold := maxRollValue - pokemonData.BaseExperience
 
-	// Set some reasonable floor and ceiling for the success threshold
-	// to ensure a minimum chance to catch and a cap for very easy Pokemon.
-	const minSuccessPoints = 40  // Corresponds to about 10% chance (40/400)
-	const maxSuccessPoints = 380 // Corresponds to about 95% chance (380/400)
+	// Apply Pokeball modifier
+	successThreshold = int(float64(successThreshold) * chosenBall.CatchRateMod)
 
-	if pokemonData.BaseExperience <= 0 { // Handle unlikely case of 0 or negative BE
-		successThreshold = maxSuccessPoints // Make it very easy to catch
+	const minSuccessPoints = 20  // Adjusted slightly if needed, or keep as is
+	const maxSuccessPoints = 390 // Adjusted slightly, ensuring it's less than maxRollValue
+
+	if pokemonData.BaseExperience <= 0 {
+		successThreshold = maxSuccessPoints
 	} else {
 		if successThreshold < minSuccessPoints {
 			successThreshold = minSuccessPoints
@@ -52,14 +71,31 @@ func commandCatch(cfg *Config, args ...string) error {
 		}
 	}
 
-	roll := rand.Intn(maxRollValue)
+	roll := cfg.Randomizer.Intn(maxRollValue)
 
 	if roll < successThreshold {
-		fmt.Printf("%s was caught!\n", pokemonData.Name)
-		fmt.Println("You may now inspect it with the inspect command.")
-		cfg.Pokedex[pokemonData.Name] = pokemonData
+		fmt.Printf("%s%s%s%s was caught!%s\n", chosenBall.Color, constants.ColorBrightGreen, pokemonData.Name, chosenBall.Color, constants.ColorReset)
+		fmt.Printf("%sYou may now inspect it with the inspect command.%s\n", constants.ColorGray, constants.ColorReset)
+
+		newUserPokemon := pokeapi.UserPokemon{
+			PokemonData:     pokemonData,
+			Level:           1,
+			CurrentXP:       0,
+			CaughtTimestamp: time.Now().UnixNano(), // Set caught timestamp
+		}
+		newUserPokemon.XPToNextLevel = newUserPokemon.CalculateNewXPToNextLevel() // Calculate based on its level
+
+		cfg.Pokedex[newUserPokemon.Name] = newUserPokemon
+
+		if len(cfg.Party) < MaxPartySize {
+			cfg.Party = append(cfg.Party, newUserPokemon)
+			fmt.Printf("%s%s%s has been added to your party!%s\n", chosenBall.Color, newUserPokemon.Name, constants.ColorReset, constants.ColorReset)
+		} else {
+			fmt.Printf("%s%s%s has been sent to your Pokedex storage as your party is full.%s\n", chosenBall.Color, newUserPokemon.Name, constants.ColorReset, constants.ColorReset)
+		}
+
 	} else {
-		fmt.Printf("%s escaped!\n", pokemonData.Name)
+		fmt.Printf("%sOh no! %s%s%s escaped!%s\n", constants.ColorRed, chosenBall.Color, pokemonData.Name, constants.ColorRed, constants.ColorReset)
 	}
 
 	return nil

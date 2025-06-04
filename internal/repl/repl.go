@@ -1,12 +1,16 @@
 package repl
 
 import (
-	"bufio"
 	"fmt"
+	"io"
+	"math/rand"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/voidarchive/pokedex/internal/pokeapi"
+	"github.com/voidarchive/pokedex/internal/shared/constants"
 )
 
 func getCommands() map[string]cliCommand {
@@ -32,7 +36,7 @@ func getCommands() map[string]cliCommand {
 			Callback:    commandMapb,
 		},
 		"explore": {
-			Name:        "explore",
+			Name:        "explore <location_area_name>",
 			Description: "Explore a location area for Pokemon",
 			Callback:    commandExplore,
 		},
@@ -51,6 +55,21 @@ func getCommands() map[string]cliCommand {
 			Description: "View all Pokemon in your Pokedex",
 			Callback:    commandPokedex,
 		},
+		"party": {
+			Name:        "party",
+			Description: "View the Pokemon in your active party",
+			Callback:    commandParty,
+		},
+		"inventory": {
+			Name:        "inventory",
+			Description: "View your items, including Pokeballs",
+			Callback:    commandInventory,
+		},
+		"battle": {
+			Name:        "battle <your_pokemon> <opponent_pokemon>",
+			Description: "Simulate a battle between one of your Pokemon and an opponent",
+			Callback:    commandBattle,
+		},
 	}
 }
 
@@ -59,26 +78,70 @@ func stringToPtr(s string) *string {
 }
 
 func StartRepl(pokeapiClient PokeapiClient, cache Pokecache) {
+	loadedPokedex, loadedParty, err := loadPokedex()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sError loading saved data: %v. Starting fresh.%s\n", constants.ColorRed, err, constants.ColorReset)
+		loadedPokedex = make(map[string]pokeapi.UserPokemon)
+		loadedParty = []pokeapi.UserPokemon{}
+	} else {
+		if loadedParty == nil {
+			loadedParty = []pokeapi.UserPokemon{}
+		}
+	}
+
+	initialInventory := map[string]int{
+		"pokeball":  10,
+		"greatball": 5,
+	}
+
 	cfg := &Config{
 		NextLocationAreaURL: stringToPtr(pokeapi.BaseURL + "/location-area"),
 		PrevLocationAreaURL: nil,
 		PokeapiClient:       pokeapiClient,
 		Cache:               cache,
-		Pokedex:             make(map[string]pokeapi.PokemonData),
+		Pokedex:             loadedPokedex,
+		Party:               loadedParty,
+		Inventory:           initialInventory,
+		Randomizer:          rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          fmt.Sprintf("%sPokedex > %s", constants.ColorCyan, constants.ColorReset),
+		HistoryFile:     "/tmp/pokedex_history.tmp",
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		fmt.Printf("%sError creating readline instance: %v%s\n", constants.ColorRed, err, constants.ColorReset)
+		return
+	}
+	defer rl.Close()
+
 	commands := getCommands()
 	for {
-		fmt.Print("Pokedex > ")
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				fmt.Fprintln(os.Stderr, "reading input:", err)
+		line, err := rl.Readline()
+		if err == readline.ErrInterrupt { // Ctrl+C
+			fmt.Printf("\n%sInterrupt received, saving game data and exiting...%s\n", constants.ColorYellow, constants.ColorReset)
+			if saveErr := savePokedex(cfg.Pokedex, cfg.Party); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "%sError saving game data on interrupt: %v%s\n", constants.ColorRed, saveErr, constants.ColorReset)
 			}
-			break
+			return
+		} else if err == io.EOF { // Ctrl+D
+			fmt.Printf("\n%sEOF received, saving game data and exiting...%s\n", constants.ColorYellow, constants.ColorReset)
+			if saveErr := savePokedex(cfg.Pokedex, cfg.Party); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "%sError saving game data on EOF: %v%s\n", constants.ColorRed, saveErr, constants.ColorReset)
+			}
+			return
+		} else if err != nil {
+			fmt.Fprintf(os.Stderr, "%sError reading input: %v%s\n", constants.ColorRed, err, constants.ColorReset)
+			continue
 		}
 
-		userInput := CleanInput(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		userInput := CleanInput(line)
 		if len(userInput) == 0 {
 			continue
 		}
@@ -93,12 +156,10 @@ func StartRepl(pokeapiClient PokeapiClient, cache Pokecache) {
 		if exists {
 			err := command.Callback(cfg, args...)
 			if err != nil {
-				fmt.Println(err)
+				fmt.Printf("%s%v%s\n", constants.ColorRed, err, constants.ColorReset)
 			}
-			continue
 		} else {
-			fmt.Println("Unknown command")
-			continue
+			fmt.Printf("%sUnknown command: %s%s%s\n", constants.ColorRed, commandName, constants.ColorRed, constants.ColorReset)
 		}
 	}
 }
