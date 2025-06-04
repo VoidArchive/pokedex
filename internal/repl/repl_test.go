@@ -1,6 +1,10 @@
-package main
+package repl_test
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/voidarchive/pokedex/internal/repl"
+)
 
 func TestCleanInput(t *testing.T) {
 	cases := []struct {
@@ -20,7 +24,7 @@ func TestCleanInput(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		actual := cleanInput(c.input)
+		actual := repl.CleanInput(c.input)
 
 		if len(actual) != len(c.expected) {
 			t.Errorf("for input %q, expected length %d but got %d", c.input, len(c.expected), len(actual))
