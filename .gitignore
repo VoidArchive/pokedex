@@ -10,6 +10,7 @@
 pokedex
 # Test binary, built with `go test -c`
 *.test
+repl.log
 
 # Code coverage profiles and other test artifacts
 *.out
